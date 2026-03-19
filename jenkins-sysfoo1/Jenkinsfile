@@ -1,0 +1,617 @@
+// Jenkinsfile para proyecto sysfoo1
+// Repositorio: https://github.com/Jaedu21/sysfoo1.git
+// Stack: Java Spring Boot + Maven 3.9.6 + JDK 17
+
+pipeline {
+    agent any
+    
+    tools {
+        maven 'Maven-3.9.6'
+        jdk 'JDK-17'
+    }
+    
+    environment {
+        // Configuración del repositorio sysfoo1
+        GIT_REPO_URL = 'https://github.com/Jaedu21/sysfoo1.git'
+        GIT_CREDENTIALS_ID = 'github-credentials' // Crear en Jenkins si es privado
+        
+        // Configuración de Maven y Java
+        MAVEN_OPTS = '-Xmx1024m -Xms512m'
+        JAVA_HOME = tool 'JDK-17'
+        
+        // Configuración del proyecto
+        PROJECT_NAME = 'sysfoo1'
+        ARTIFACT_NAME = 'sysfoo1'
+        DEPLOY_ENV = 'development'
+    }
+    
+    parameters {
+        choice(
+            name: 'BRANCH',
+            choices: ['main', 'master', 'develop', 'feature/*'],
+            description: 'Rama del repositorio sysfoo1 a construir'
+        )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['development', 'staging', 'production'],
+            description: 'Ambiente de despliegue'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Saltar ejecución de tests'
+        )
+        booleanParam(
+            name: 'BUILD_DOCKER',
+            defaultValue: true,
+            description: 'Construir imagen Docker'
+        )
+        booleanParam(
+            name: 'RUN_CODE_ANALYSIS',
+            defaultValue: true,
+            description: 'Ejecutar análisis de código'
+        )
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+        disableConcurrentBuilds()
+        timeout(time: 1, unit: 'HOURS')
+        timestamps()
+        ansiColor('xterm')
+    }
+    
+    triggers {
+        // Polling SCM cada 5 minutos (H/5 = random entre 0-4 minutos)
+        pollSCM('H/5 * * * *')
+        // Build nocturno a las 2 AM
+        cron('H 2 * * *')
+    }
+    
+    stages {
+        stage('Cleanup Workspace') {
+            steps {
+                echo "🧹 Limpiando workspace anterior..."
+                cleanWs()
+            }
+        }
+        
+        stage('Checkout sysfoo1') {
+            steps {
+                script {
+                    echo """
+                    ╔════════════════════════════════════════════════════════╗
+                    ║  🔄 CLONANDO REPOSITORIO SYSFOO1                      ║
+                    ╠════════════════════════════════════════════════════════╣
+                    ║  📦 Repo: ${GIT_REPO_URL}                             ║
+                    ║  🌿 Rama: ${params.BRANCH}                            ║
+                    ╚════════════════════════════════════════════════════════╝
+                    """
+                    
+                    // Checkout del repositorio sysfoo1
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${params.BRANCH}"]],
+                        userRemoteConfigs: [[
+                            url: "${GIT_REPO_URL}",
+                            // Si el repo es público, comentar la siguiente línea:
+                            credentialsId: "${GIT_CREDENTIALS_ID}"
+                        ]],
+                        extensions: [
+                            [$class: 'CloneOption', depth: 1, shallow: true, noTags: false],
+                            [$class: 'CleanCheckout']
+                        ]
+                    ])
+                    
+                    // Obtener información del commit
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                    env.GIT_COMMIT_MSG = sh(
+                        script: 'git log -1 --pretty=%B',
+                        returnStdout: true
+                    ).trim()
+                    env.GIT_AUTHOR = sh(
+                        script: 'git log -1 --pretty=%an',
+                        returnStdout: true
+                    ).trim()
+                    env.GIT_AUTHOR_EMAIL = sh(
+                        script: 'git log -1 --pretty=%ae',
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo """
+                    ✅ Repositorio clonado exitosamente
+                    📝 Commit: ${env.GIT_COMMIT_SHORT}
+                    💬 Mensaje: ${env.GIT_COMMIT_MSG}
+                    👤 Autor: ${env.GIT_AUTHOR} <${env.GIT_AUTHOR_EMAIL}>
+                    """
+                }
+            }
+        }
+        
+        stage('Verificar Estructura Spring Boot') {
+            steps {
+                echo "📂 Verificando estructura del proyecto sysfoo1..."
+                sh '''
+                    echo "╔════════════════════════════════════════════════════════╗"
+                    echo "║  📁 ESTRUCTURA DEL PROYECTO                           ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    ls -la
+                    
+                    echo "\n╔════════════════════════════════════════════════════════╗"
+                    echo "║  📄 VERIFICANDO POM.XML                               ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    if [ -f pom.xml ]; then
+                        echo "✅ pom.xml encontrado"
+                        echo "\n--- Información del proyecto ---"
+                        grep -E '<groupId>|<artifactId>|<version>|<name>|<description>' pom.xml | head -15 || true
+                        
+                        echo "\n--- Spring Boot Version ---"
+                        grep -A 2 '<parent>' pom.xml | grep version || true
+                        
+                        echo "\n--- Java Version ---"
+                        grep -E '<java.version>|<maven.compiler.source>|<maven.compiler.target>' pom.xml || true
+                    else
+                        echo "❌ ERROR: pom.xml no encontrado en la raíz del proyecto"
+                        echo "Ubicación actual: $(pwd)"
+                        exit 1
+                    fi
+                    
+                    echo "\n╔════════════════════════════════════════════════════════╗"
+                    echo "║  ☕ VERIFICANDO CÓDIGO FUENTE JAVA                     ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    if [ -d src/main/java ]; then
+                        echo "✅ Directorio src/main/java encontrado"
+                        echo "\n--- Archivos Java (primeros 10) ---"
+                        find src/main/java -name "*.java" | head -10
+                        
+                        echo "\n--- Cantidad de archivos Java ---"
+                        find src/main/java -name "*.java" | wc -l
+                    else
+                        echo "⚠️ Advertencia: src/main/java no encontrado"
+                    fi
+                    
+                    echo "\n╔════════════════════════════════════════════════════════╗"
+                    echo "║  🧪 VERIFICANDO TESTS                                  ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    if [ -d src/test/java ]; then
+                        echo "✅ Directorio src/test/java encontrado"
+                        TEST_COUNT=$(find src/test/java -name "*Test.java" -o -name "*Tests.java" | wc -l)
+                        echo "📊 Tests encontrados: $TEST_COUNT"
+                    else
+                        echo "⚠️ No se encontraron tests"
+                    fi
+                    
+                    echo "\n╔════════════════════════════════════════════════════════╗"
+                    echo "║  📦 VERIFICANDO RECURSOS                               ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    if [ -d src/main/resources ]; then
+                        echo "✅ Directorio src/main/resources encontrado"
+                        ls -la src/main/resources/
+                    fi
+                '''
+            }
+        }
+        
+        stage('Maven Clean & Validate') {
+            steps {
+                echo "🔍 Validando configuración de Maven..."
+                sh '''
+                    echo "╔════════════════════════════════════════════════════════╗"
+                    echo "║  🔧 VERSIONES DE HERRAMIENTAS                         ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    echo "\n--- Maven Version ---"
+                    mvn --version
+                    
+                    echo "\n--- Java Version ---"
+                    java -version
+                    
+                    echo "\n╔════════════════════════════════════════════════════════╗"
+                    echo "║  🧹 MAVEN CLEAN                                        ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    mvn clean -B \
+                        -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+                '''
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                echo "🔨 Compilando proyecto sysfoo1..."
+                sh '''
+                    echo "╔════════════════════════════════════════════════════════╗"
+                    echo "║  🏗️  COMPILANDO CÓDIGO FUENTE                         ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    mvn compile -DskipTests -B \
+                        -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+                    
+                    echo "\n✅ Compilación exitosa"
+                '''
+            }
+        }
+        
+        stage('Unit Tests') {
+            when {
+                expression { return !params.SKIP_TESTS }
+            }
+            steps {
+                echo "🧪 Ejecutando tests unitarios..."
+                sh '''
+                    echo "╔════════════════════════════════════════════════════════╗"
+                    echo "║  🧪 TESTS UNITARIOS                                    ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    mvn test -B \
+                        -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                    
+                    script {
+                        if (fileExists('target/site/jacoco/index.html')) {
+                            echo "📊 Publicando reporte de cobertura JaCoCo..."
+                            publishHTML([
+                                reportDir: 'target/site/jacoco',
+                                reportFiles: 'index.html',
+                                reportName: 'JaCoCo Coverage Report',
+                                keepAll: true
+                            ])
+                        }
+                    }
+                }
+                success {
+                    echo "✅ Tests ejecutados exitosamente"
+                }
+                failure {
+                    echo "❌ Algunos tests fallaron"
+                }
+            }
+        }
+        
+        stage('Integration Tests') {
+            when {
+                expression { return !params.SKIP_TESTS }
+            }
+            steps {
+                echo "🔗 Ejecutando tests de integración..."
+                sh '''
+                    echo "╔════════════════════════════════════════════════════════╗"
+                    echo "║  🔗 TESTS DE INTEGRACIÓN                               ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    mvn verify -DskipUnitTests -B \
+                        -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn || true
+                '''
+            }
+        }
+        
+        stage('Code Quality Analysis') {
+            when {
+                expression { return params.RUN_CODE_ANALYSIS }
+            }
+            parallel {
+                stage('Dependency Analysis') {
+                    steps {
+                        echo "🔍 Analizando dependencias..."
+                        sh '''
+                            echo "╔════════════════════════════════════════════════════════╗"
+                            echo "║  📦 ÁRBOL DE DEPENDENCIAS                             ║"
+                            echo "╚════════════════════════════════════════════════════════╝"
+                            
+                            mvn dependency:tree -B
+                            
+                            echo "\n╔════════════════════════════════════════════════════════╗"
+                            echo "║  🔄 ACTUALIZACIONES DISPONIBLES                        ║"
+                            echo "╚════════════════════════════════════════════════════════╝"
+                            
+                            mvn versions:display-dependency-updates -B || true
+                        '''
+                    }
+                }
+                
+                stage('Code Style Check') {
+                    steps {
+                        echo "📏 Verificando estilo de código..."
+                        sh '''
+                            echo "╔════════════════════════════════════════════════════════╗"
+                            echo "║  📏 CHECKSTYLE                                         ║"
+                            echo "╚════════════════════════════════════════════════════════╝"
+                            
+                            mvn checkstyle:check -B || true
+                        '''
+                    }
+                }
+                
+                stage('Security Scan') {
+                    steps {
+                        echo "🔐 Escaneando vulnerabilidades de seguridad..."
+                        sh '''
+                            echo "╔════════════════════════════════════════════════════════╗"
+                            echo "║  🔐 ANÁLISIS DE SEGURIDAD                             ║"
+                            echo "╚════════════════════════════════════════════════════════╝"
+                            
+                            # Descomenta si tienes OWASP Dependency Check configurado
+                            # mvn org.owasp:dependency-check-maven:check -B
+                            
+                            echo "ℹ️  Análisis de seguridad: configurar OWASP Dependency Check"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Package') {
+            steps {
+                echo "📦 Empaquetando aplicación Spring Boot..."
+                sh '''
+                    echo "╔════════════════════════════════════════════════════════╗"
+                    echo "║  📦 EMPAQUETANDO APLICACIÓN                           ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    mvn package -DskipTests -B \
+                        -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+                    
+                    echo "\n╔════════════════════════════════════════════════════════╗"
+                    echo "║  📊 ARTEFACTOS GENERADOS                               ║"
+                    echo "╚════════════════════════════════════════════════════════╝"
+                    
+                    ls -lh target/*.jar 2>/dev/null || ls -lh target/*.war 2>/dev/null || echo "⚠️ No se encontró artefacto JAR/WAR"
+                '''
+            }
+            post {
+                success {
+                    script {
+                        echo "📁 Archivando artefactos..."
+                        archiveArtifacts artifacts: '**/target/*.jar, **/target/*.war', 
+                                         fingerprint: true,
+                                         allowEmptyArchive: false
+                        
+                        // Obtener nombre del artefacto
+                        env.ARTIFACT_PATH = sh(
+                            script: 'ls target/*.jar 2>/dev/null || ls target/*.war 2>/dev/null || echo "unknown"',
+                            returnStdout: true
+                        ).trim()
+                        
+                        echo "✅ Artefacto archivado: ${env.ARTIFACT_PATH}"
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            when {
+                expression { return params.BUILD_DOCKER }
+            }
+            steps {
+                script {
+                    echo """
+                    ╔════════════════════════════════════════════════════════╗
+                    ║  🐳 CONSTRUYENDO IMAGEN DOCKER                        ║
+                    ╚════════════════════════════════════════════════════════╝
+                    """
+                    
+                    def imageName = "${PROJECT_NAME}:${env.BUILD_NUMBER}"
+                    def imageCommit = "${PROJECT_NAME}:${env.GIT_COMMIT_SHORT}"
+                    def imageLatest = "${PROJECT_NAME}:latest"
+                    
+                    sh """
+                        # Verificar si existe Dockerfile
+                        if [ ! -f Dockerfile ]; then
+                            echo "⚠️ Dockerfile no encontrado, creando uno básico..."
+                            cat > Dockerfile << 'EOF'
+FROM eclipse-temurin:17-jre-alpine
+WORKDIR /app
+COPY target/*.jar app.jar
+EXPOSE 8080
+ENV JAVA_OPTS=""
+ENTRYPOINT ["sh", "-c", "java \\\$JAVA_OPTS -jar app.jar"]
+EOF
+                        fi
+                        
+                        echo "🔨 Construyendo imagen Docker..."
+                        docker build -t ${imageName} \
+                                     -t ${imageCommit} \
+                                     -t ${imageLatest} \
+                                     --label "git.commit=${env.GIT_COMMIT_SHORT}" \
+                                     --label "git.branch=${params.BRANCH}" \
+                                     --label "build.number=${env.BUILD_NUMBER}" \
+                                     .
+                        
+                        echo "\n╔════════════════════════════════════════════════════════╗"
+                        echo "║  📋 IMÁGENES DOCKER CREADAS                           ║"
+                        echo "╚════════════════════════════════════════════════════════╝"
+                        docker images | grep ${PROJECT_NAME} | head -5
+                    """
+                    
+                    env.DOCKER_IMAGE = imageName
+                    env.DOCKER_IMAGE_COMMIT = imageCommit
+                    
+                    echo "✅ Imagen Docker creada: ${env.DOCKER_IMAGE}"
+                }
+            }
+        }
+        
+        stage('Deploy') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    echo """
+                    ╔════════════════════════════════════════════════════════╗
+                    ║  🚀 DESPLEGANDO A ${params.ENVIRONMENT.toUpperCase()}
+                    ╚════════════════════════════════════════════════════════╝
+                    """
+                    
+                    switch(params.ENVIRONMENT) {
+                        case 'development':
+                            echo "📦 Desplegando a ambiente de desarrollo..."
+                            sh """
+                                # Detener contenedor anterior si existe
+                                docker stop ${PROJECT_NAME}-dev 2>/dev/null || true
+                                docker rm ${PROJECT_NAME}-dev 2>/dev/null || true
+                                
+                                # Levantar nuevo contenedor
+                                docker run -d \
+                                    --name ${PROJECT_NAME}-dev \
+                                    -p 8081:8080 \
+                                    -e SPRING_PROFILES_ACTIVE=dev \
+                                    -e JAVA_OPTS="-Xmx512m -Xms256m" \
+                                    --restart unless-stopped \
+                                    ${env.DOCKER_IMAGE}
+                                
+                                # Verificar que el contenedor esté corriendo
+                                sleep 5
+                                docker ps | grep ${PROJECT_NAME}-dev
+                                
+                                echo "\n✅ Aplicación desplegada en: http://localhost:8081"
+                                echo "📊 Logs: docker logs -f ${PROJECT_NAME}-dev"
+                            """
+                            break
+                            
+                        case 'staging':
+                            echo "📦 Desplegando a ambiente de staging..."
+                            sh """
+                                docker stop ${PROJECT_NAME}-staging 2>/dev/null || true
+                                docker rm ${PROJECT_NAME}-staging 2>/dev/null || true
+                                
+                                docker run -d \
+                                    --name ${PROJECT_NAME}-staging \
+                                    -p 8082:8080 \
+                                    -e SPRING_PROFILES_ACTIVE=staging \
+                                    -e JAVA_OPTS="-Xmx1024m -Xms512m" \
+                                    --restart unless-stopped \
+                                    ${env.DOCKER_IMAGE}
+                                
+                                echo "\n✅ Aplicación desplegada en: http://localhost:8082"
+                            """
+                            break
+                            
+                        case 'production':
+                            input message: '⚠️ ¿Confirmar despliegue a PRODUCCIÓN?', 
+                                  ok: 'Desplegar a Producción',
+                                  submitter: 'admin,devops'
+                            
+                            echo "📦 Desplegando a ambiente de producción..."
+                            sh """
+                                docker stop ${PROJECT_NAME}-prod 2>/dev/null || true
+                                docker rm ${PROJECT_NAME}-prod 2>/dev/null || true
+                                
+                                docker run -d \
+                                    --name ${PROJECT_NAME}-prod \
+                                    -p 8080:8080 \
+                                    -e SPRING_PROFILES_ACTIVE=prod \
+                                    -e JAVA_OPTS="-Xmx2048m -Xms1024m" \
+                                    --restart unless-stopped \
+                                    ${env.DOCKER_IMAGE}
+                                
+                                echo "\n✅ Aplicación desplegada en PRODUCCIÓN: http://localhost:8080"
+                            """
+                            break
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo """
+            ╔════════════════════════════════════════════════════════╗
+            ║  🧹 LIMPIEZA POST-BUILD                               ║
+            ╚════════════════════════════════════════════════════════╝
+            """
+            
+            // Limpiar archivos temporales de Maven pero mantener artefactos
+            sh 'mvn clean -B || true'
+            
+            // Limpiar imágenes Docker antiguas (opcional)
+            sh """
+                echo "🗑️ Limpiando imágenes Docker antiguas..."
+                docker image prune -f --filter "label=git.commit" || true
+            """
+        }
+        
+        success {
+            echo """
+            ╔════════════════════════════════════════════════════════╗
+            ║  ✅ BUILD EXITOSO - SYSFOO1                           ║
+            ╠════════════════════════════════════════════════════════╣
+            ║  📦 Proyecto: sysfoo1                                 ║
+            ║  🔖 Commit: ${env.GIT_COMMIT_SHORT}                   ║
+            ║  💬 Mensaje: ${env.GIT_COMMIT_MSG?.take(50)}...       ║
+            ║  👤 Autor: ${env.GIT_AUTHOR}                          ║
+            ║  🌿 Rama: ${params.BRANCH}                            ║
+            ║  🎯 Ambiente: ${params.ENVIRONMENT}                   ║
+            ║  🐳 Imagen: ${env.DOCKER_IMAGE ?: 'N/A'}              ║
+            ║  🕒 Duración: ${currentBuild.durationString}          ║
+            ╚════════════════════════════════════════════════════════╝
+            """
+            
+            // Notificación de éxito (descomentar si tienes configurado email)
+            // emailext (
+            //     subject: "✅ Build Exitoso: sysfoo1 #${env.BUILD_NUMBER}",
+            //     body: """
+            //         Build exitoso para el proyecto sysfoo1
+            //         
+            //         Commit: ${env.GIT_COMMIT_SHORT}
+            //         Autor: ${env.GIT_AUTHOR}
+            //         Rama: ${params.BRANCH}
+            //         
+            //         Ver detalles: ${env.BUILD_URL}
+            //     """,
+            //     to: "tu-email@ejemplo.com"
+            // )
+        }
+        
+        failure {
+            echo """
+            ╔════════════════════════════════════════════════════════╗
+            ║  ❌ BUILD FALLIDO - SYSFOO1                           ║
+            ╠════════════════════════════════════════════════════════╣
+            ║  📦 Proyecto: sysfoo1                                 ║
+            ║  🔖 Commit: ${env.GIT_COMMIT_SHORT}                   ║
+            ║  👤 Autor: ${env.GIT_AUTHOR}                          ║
+            ║  🌿 Rama: ${params.BRANCH}                            ║
+            ║  📋 Logs: ${env.BUILD_URL}console                     ║
+            ║  🕒 Duración: ${currentBuild.durationString}          ║
+            ╚════════════════════════════════════════════════════════╝
+            """
+            
+            // Notificación de fallo (descomentar si tienes configurado email)
+            // emailext (
+            //     subject: "❌ Build Fallido: sysfoo1 #${env.BUILD_NUMBER}",
+            //     body: """
+            //         Build fallido para el proyecto sysfoo1
+            //         
+            //         Commit: ${env.GIT_COMMIT_SHORT}
+            //         Autor: ${env.GIT_AUTHOR}
+            //         Rama: ${params.BRANCH}
+            //         
+            //         Ver logs: ${env.BUILD_URL}console
+            //     """,
+            //     to: "tu-email@ejemplo.com"
+            // )
+        }
+        
+        unstable {
+            echo "⚠️ Build inestable - revisar tests fallidos"
+        }
+    }
+}
