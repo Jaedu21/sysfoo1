@@ -1,0 +1,38 @@
+# Docker Compose para Jenkins + sysfoo1
+# Este archivo orquestará tanto tu aplicación sysfoo1 como la base de datos PostgreSQL, 
+# inyectando el perfil prod que definimos.
+services:
+  db-prod:
+    image: postgres:15-alpine
+    container_name: sysfoo-db
+    environment:
+      - POSTGRES_DB=sysfoo
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASS}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d sysfoo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  sysfoo-app:
+    build: .  # <--- Agrega esto para que Docker construya la imagen localmente
+    image: sysfoo1:latest
+    container_name: sysfoo-app
+    depends_on:
+      db-prod:
+        condition: service_healthy # Solo arranca la app si la DB está lista
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://db-prod:5432/sysfoo
+      - SPRING_DATASOURCE_USERNAME=${DB_USER}
+      - SPRING_DATASOURCE_PASSWORD=${DB_PASS}
+    # Esto asegura que el contenedor tenga límites de recursos (Práctica SRE)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
